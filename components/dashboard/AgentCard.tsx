@@ -1,7 +1,88 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { Play, Eye, Edit2, BarChart2, Loader2, CheckCircle, AlertCircle, X, Beaker } from "lucide-react";
+import { Play, Eye, Edit2, BarChart2, Loader2, CheckCircle, AlertCircle, X, Beaker, Wallet } from "lucide-react";
 import { useState } from "react";
-import { useAccount } from "wagmi";
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useSwitchChain, usePublicClient } from "wagmi";
+import { parseEther, decodeEventLog } from "viem";
+import { avalancheFuji } from "wagmi/chains";
+
+const CONTRACT_ABI = [
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "developer",
+        "type": "address"
+      }
+    ],
+    "name": "createExecution",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "completeExecution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "refundExecution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "executionId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "developer",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "ExecutionCreated",
+    "type": "event"
+  }
+] as const;
 
 interface AgentCardProps {
   id?: string;
@@ -30,11 +111,17 @@ export function AgentCard({
   inputType = "text",
   outputType = "text"
 }: AgentCardProps) {
-  const { address } = useAccount();
+  const { address, chainId } = useAccount();
+  const { switchChain } = useSwitchChain();
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+  
   const [isExecuting, setIsExecuting] = useState(false);
-  const [executionState, setExecutionState] = useState<"idle" | "input" | "requesting" | "payment_required" | "processing_payment" | "running" | "completed" | "failed" | "testing">("idle");
+  const [executionState, setExecutionState] = useState<"idle" | "input" | "requesting" | "payment_required" | "processing_payment" | "verifying_tx" | "running" | "completed" | "failed" | "testing">("idle");
   const [executionResult, setExecutionResult] = useState<any>(null);
   const [executionId, setExecutionId] = useState<string | null>(null);
+  const [paymentDetails, setPaymentDetails] = useState<any>(null);
+  const [developerWallet, setDeveloperWallet] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [userInput, setUserInput] = useState<string>("");
   const [testResult, setTestResult] = useState<any>(null);
@@ -84,34 +171,33 @@ export function AgentCard({
         }
       }
 
-      // 1. Execute Agent Request
-      const execRes = await fetch("/api/execute-agent", {
+      // 1. Create Execution
+      const createRes = await fetch("/api/executions/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agentId: id,
-          wallet: address,
+          userWallet: address,
           input: finalInput
         }),
       });
       
-      const execText = await execRes.text();
-      let execData: any;
+      const createText = await createRes.text();
+      let createData: any;
       try {
-        execData = JSON.parse(execText);
+        createData = JSON.parse(createText);
       } catch (e) {
-        throw new Error(`Server error (${execRes.status}): Invalid response format`);
+        throw new Error(`Server error (${createRes.status}): Invalid response format`);
       }
 
-      if (!execData.success) throw new Error(execData.message);
-      setExecutionId(execData.executionId);
+      if (!createData.success) throw new Error(createData.message);
+      setExecutionId(createData.executionId);
 
       // 2. Payment Request
-      setExecutionState("payment_required");
       const payReqRes = await fetch("/api/payment/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ executionId: execData.executionId }),
+        body: JSON.stringify({ executionId: createData.executionId }),
       });
       
       const payReqText = await payReqRes.text();
@@ -123,6 +209,10 @@ export function AgentCard({
       }
 
       if (!payReqData.success) throw new Error(payReqData.message);
+      
+      setPaymentDetails(payReqData.payment);
+      setDeveloperWallet(payReqData.developerWallet);
+      setExecutionState("payment_required");
 
     } catch (error: any) {
       console.error("Run agent error:", error);
@@ -131,15 +221,59 @@ export function AgentCard({
     }
   };
 
-  const handleSimulatePayment = async () => {
-    if (!executionId) return;
+  const handleContractPayment = async () => {
+    if (!executionId || !paymentDetails || !developerWallet) return;
 
-    setExecutionState("processing_payment");
     try {
+      // PART 4 & 6 - Debug and Validation
+      console.log("Payment target (Contract):", paymentDetails.contract);
+      console.log("Amount (AVAX):", paymentDetails.amount);
+      console.log("Developer Wallet:", developerWallet);
+
+      if (!paymentDetails.contract) {
+        throw new Error("Contract address missing from payment details");
+      }
+
+      // Ensure we are on Avalanche Fuji
+      if (chainId !== avalancheFuji.id) {
+        setExecutionState("processing_payment");
+        await switchChain({ chainId: avalancheFuji.id });
+      }
+
+      setExecutionState("processing_payment");
+
+      // PART 9 - Call createExecution on Escrow Contract
+      const contractAddr = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || paymentDetails.contract;
+      
+      const txHash = await writeContractAsync({
+        address: contractAddr as `0x${string}`,
+        abi: CONTRACT_ABI,
+        functionName: 'createExecution',
+        args: [developerWallet as `0x${string}`],
+        value: parseEther(paymentDetails.amount.toString()),
+      });
+
+      console.log("Transaction sent:", txHash);
+      setExecutionState("verifying_tx");
+
+      // PART 2 - Wait for transaction confirmation properly
+      if (publicClient) {
+        console.log("Waiting for transaction receipt...");
+        await publicClient.waitForTransactionReceipt({ 
+          hash: txHash 
+        });
+        console.log("Transaction confirmed on-chain");
+      }
+
       const confirmRes = await fetch("/api/payment/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ executionId }),
+        body: JSON.stringify({ 
+          executionId,
+          txHash,
+          userWallet: address,
+          contractExecutionId: 0 // Backend will find the real one from logs
+        }),
       });
       
       const confirmText = await confirmRes.text();
@@ -150,24 +284,55 @@ export function AgentCard({
         throw new Error(`Server error (${confirmRes.status}): Invalid response format`);
       }
 
-      if (!confirmData.success) throw new Error(confirmData.message);
-
-      setExecutionState("running");
-      
-      // The confirm API also triggers execution in this simulation
-      // So we wait for the result
-      if (confirmData.status === "completed") {
-        setExecutionResult(confirmData.result);
-        setExecutionState("completed");
-      } else {
-        throw new Error("Execution failed to complete");
+      if (!confirmData.success) {
+        throw new Error(confirmData.message || "Payment confirmation failed");
       }
 
+      // PART 9 - Set to running after success
+      setExecutionState("running");
+      pollExecutionStatus(executionId);
+
     } catch (error: any) {
-      console.error("Payment confirmation error:", error);
-      setExecutionState("failed");
-      setErrorMessage(error.message);
+      console.error("Payment error:", error);
+      // PART 1 & 6 - Only set failed if it's an actual error, not just a slow confirm
+      if (error.message?.includes("User rejected") || error.message?.includes("failed")) {
+        setExecutionState("failed");
+        setErrorMessage(error.message || "Transaction failed or rejected");
+      } else if (!executionState.includes("running")) {
+        // If we are already running (polling), don't set to failed on a late network error
+        setExecutionState("failed");
+        setErrorMessage(error.message || "Something went wrong during payment");
+      }
     }
+  };
+
+  const pollExecutionStatus = async (execId: string) => {
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/executions/${execId}`);
+        const data = await response.json();
+
+        if (data.success) {
+          // PART 5 - Polling must continue if status is paid or running
+          if (data.status === "completed") {
+            clearInterval(interval);
+            setExecutionResult(data.result);
+            setExecutionState("completed");
+            console.log("Execution completed successfully");
+          } else if (data.status === "failed") {
+            clearInterval(interval);
+            setExecutionState("failed");
+            setErrorMessage(data.errorMessage || "Agent execution failed");
+            console.log("Execution failed:", data.errorMessage);
+          } else if (data.status === "running") {
+            setExecutionState("running");
+          }
+          // if "paid", just keep polling
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+      }
+    }, 1500); // Slightly slower polling to be safe
   };
 
   const resetExecution = () => {
@@ -175,6 +340,7 @@ export function AgentCard({
     setExecutionState("idle");
     setExecutionResult(null);
     setExecutionId(null);
+    setPaymentDetails(null);
     setErrorMessage(null);
     setUserInput("");
     setTestResult(null);
@@ -302,7 +468,8 @@ export function AgentCard({
                     {executionState === "input" && "Agent Input"}
                     {executionState === "requesting" && "Initializing..."}
                     {executionState === "payment_required" && "Payment Required"}
-                    {executionState === "processing_payment" && "Confirming Payment..."}
+                    {executionState === "processing_payment" && "Switching Network..."}
+                    {executionState === "verifying_tx" && "Verifying Transaction..."}
                     {executionState === "running" && "Executing Agent..."}
                     {executionState === "completed" && "Execution Complete"}
                     {executionState === "failed" && "Execution Failed"}
@@ -310,7 +477,8 @@ export function AgentCard({
                   <p className="text-[#A1A1A1] text-sm">
                     {executionState === "testing" && (testResult ? (testResult.success ? "Agent reachable and working!" : "Agent test failed.") : "Checking if agent is reachable...")}
                     {executionState === "input" && `Please provide the required ${inputType} data.`}
-                    {executionState === "payment_required" && `This agent requires ${price} to run.`}
+                    {executionState === "payment_required" && `This agent requires ${price} to run. Funds will be held in escrow.`}
+                    {executionState === "verifying_tx" && "Waiting for blockchain confirmation..."}
                     {executionState === "running" && "The AI agent is processing your request."}
                     {executionState === "completed" && "The results are ready below."}
                     {executionState === "failed" && (errorMessage || "Something went wrong.")}
@@ -377,10 +545,11 @@ export function AgentCard({
 
                 {executionState === "payment_required" && (
                   <button
-                    onClick={handleSimulatePayment}
-                    className="w-full bg-[#00FF88] hover:bg-[#00C76A] text-black font-bold py-3.5 rounded-xl transition-all shadow-[0_0_20px_rgba(0,255,136,0.2)]"
+                    onClick={handleContractPayment}
+                    className="w-full bg-[#00FF88] hover:bg-[#00C76A] text-black font-bold py-3.5 rounded-xl transition-all shadow-[0_0_20px_rgba(0,255,136,0.2)] flex items-center justify-center gap-2"
                   >
-                    Simulate Payment ({price})
+                    <Wallet className="w-5 h-5" />
+                    Pay Escrow ({price})
                   </button>
                 )}
 

@@ -6,11 +6,11 @@ import Execution from "@/models/Execution";
 export async function POST(req: NextRequest) {
   try {
     await connectDB();
-    const { agentId, wallet, input } = await req.json();
+    const { agentId, userWallet, input } = await req.json();
 
-    if (!agentId || !wallet) {
+    if (!agentId || !userWallet) {
       return NextResponse.json(
-        { success: false, message: "Agent ID and wallet address are required" },
+        { success: false, message: "Agent ID and user wallet are required" },
         { status: 400 }
       );
     }
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     }
 
     const execution = await Execution.create({
-      userWallet: wallet.toLowerCase(),
+      userWallet: userWallet.toLowerCase(),
       agentId: agent._id,
       paymentAmount: agent.pricePerRun,
       status: "pending",
@@ -34,11 +34,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       executionId: execution._id,
-      paymentRequired: true,
-      amount: agent.pricePerRun,
     });
   } catch (error: any) {
-    console.error("Execute agent error:", error);
+    console.error("Create execution error:", error);
     return NextResponse.json(
       { success: false, message: error.message || "Internal Server Error" },
       { status: 500 }

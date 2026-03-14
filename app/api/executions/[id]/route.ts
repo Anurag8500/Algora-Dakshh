@@ -27,15 +27,15 @@ export async function GET(
 
     return NextResponse.json({
       success: true,
-      data: {
-        status: execution.status,
-        result: execution.result,
-        paymentAmount: execution.paymentAmount,
-        createdAt: execution.createdAt,
-      },
+      status: execution.status,
+      result: execution.result,
+      latency: execution.latency,
+      startedAt: (execution as any).startedAt,
+      completedAt: execution.completedAt,
+      errorMessage: execution.errorMessage,
     });
   } catch (error: any) {
-    console.error("Execution result fetch error:", error);
+    console.error("Fetch execution error:", error);
     return NextResponse.json(
       { success: false, message: error.message || "Internal Server Error" },
       { status: 500 }

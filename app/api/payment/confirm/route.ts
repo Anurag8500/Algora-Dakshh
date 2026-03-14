@@ -1,28 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import connectDB from "@/lib/mongodb";
 import Execution from "@/models/Execution";
-import Agent from "@/models/Agent";
-import { executeAgent } from "@/lib/agentRouter";
-import crypto from "crypto";
+import { executeAgent } from "@/services/executionService";
+import { ethers } from "ethers";
+import { verifyContractPayment } from "@/lib/contractService";
+import { verifyAvalanchePayment } from "@/lib/avalancheVerifier";
 
-/**
- * Simulates payment verification.
- * In the future, this will be replaced by Facinet or smart contract verification.
- */
-async function verifyPayment(executionId: string): Promise<boolean> {
-  // Simulate network delay
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  return true;
-}
+const RPC_URL = process.env.AVALANCHE_RPC || "https://api.avax-test.network/ext/bc/C/rpc";
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
 export async function POST(req: NextRequest) {
   try {
     await connectDB();
-    const { executionId } = await req.json();
 
-    if (!executionId) {
+    const { executionId, txHash, contractExecutionId } = await req.json();
+
+    if (!executionId || !txHash) {
       return NextResponse.json(
-        { success: false, message: "Execution ID is required" },
+        { success: false, message: "Missing required confirmation data" },
         { status: 400 }
       );
     }
@@ -35,72 +30,100 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Verify Payment (Simulation)
-    const isPaid = await verifyPayment(executionId);
-    if (!isPaid) {
+    // 1. Verify transaction on blockchain
+    const verifierRes = await verifyAvalanchePayment(
+      txHash,
+      execution.userWallet,
+      CONTRACT_ADDRESS || "",
+      execution.paymentAmount
+    );
+
+    if (!verifierRes.success) {
       return NextResponse.json(
-        { success: false, message: "Payment verification failed" },
+        { success: false, message: verifierRes.message },
         { status: 400 }
       );
     }
 
-    // Update status to paid
-    execution.status = "paid";
-    await execution.save();
-
-    // 2. Start Execution Process
-    execution.status = "running";
-    await execution.save();
-
-    const agent = await Agent.findById(execution.agentId);
-    if (!agent) {
-      execution.status = "failed";
-      await execution.save();
-      return NextResponse.json(
-        { success: false, message: "Agent not found" },
-        { status: 404 }
-      );
-    }
-
-    // Call Agent Router
-    const result = await executeAgent(agent, execution.input);
-
-    if (result.success) {
-      // Generate result hash
-      const resultHash = crypto
-        .createHash("sha256")
-        .update(JSON.stringify(result.data))
-        .digest("hex");
-
-      // Update Execution
-      execution.status = "completed";
-      execution.result = result.data;
-      execution.resultHash = resultHash;
-      if (result.latency) {
-        (execution as any).latency = result.latency;
+    // PART 7 - Extra strict check for contract address
+    if (CONTRACT_ADDRESS && verifierRes.success) {
+      const provider = new ethers.JsonRpcProvider(RPC_URL);
+      const tx = await provider.getTransaction(txHash);
+      if (tx?.to?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) {
+        return NextResponse.json(
+          { success: false, message: "Payment not sent to escrow contract" },
+          { status: 400 }
+        );
       }
-      (execution as any).completedAt = new Date();
-      await execution.save();
+    }
 
-      // 3. Update Agent Stats
-      agent.totalExecutions += 1;
-      agent.revenueGenerated += execution.paymentAmount;
-      await agent.save();
+    // Find contractExecutionId from logs if not provided or provided as 0
+    let finalContractExecutionId = contractExecutionId;
+    if (!finalContractExecutionId) {
+      const provider = new ethers.JsonRpcProvider(RPC_URL);
+      const receipt = await provider.getTransactionReceipt(txHash);
+      
+      if (receipt) {
+        // Parse logs for ExecutionCreated event
+        const iface = new ethers.Interface([
+          "event ExecutionCreated(uint256 indexed executionId, address indexed user, address indexed developer, uint256 amount)"
+        ]);
+        
+        const log = receipt.logs.find(l => l.address.toLowerCase() === CONTRACT_ADDRESS?.toLowerCase());
+        if (log) {
+          try {
+            const parsedLog = iface.parseLog(log);
+            if (parsedLog) {
+              finalContractExecutionId = Number(parsedLog.args.executionId);
+            }
+          } catch (e) {
+            console.error("Failed to parse logs:", e);
+          }
+        }
+      }
+    }
 
-      return NextResponse.json({
-        success: true,
-        status: "completed",
-        result: result.data,
-      });
-    } else {
-      execution.status = "failed";
-      (execution as any).errorMessage = result.message || "Agent execution failed";
-      await execution.save();
+    if (!finalContractExecutionId) {
       return NextResponse.json(
-        { success: false, message: result.message || "Agent execution failed" },
-        { status: 500 }
+        { success: false, message: "Could not determine contract execution ID" },
+        { status: 400 }
       );
     }
+
+    // 2. Verify state in contract
+    const isVerified = await verifyContractPayment(
+      finalContractExecutionId,
+      execution.userWallet,
+      execution.paymentAmount.toString()
+    );
+
+    if (!isVerified) {
+      return NextResponse.json(
+        { success: false, message: "Contract state verification failed" },
+        { status: 400 }
+      );
+    }
+
+    // 3. Update execution
+    execution.status = "paid";
+    execution.txHash = txHash;
+    execution.contractExecutionId = finalContractExecutionId;
+    await execution.save();
+
+    // PART 3 & 7 - Trigger execution immediately and add logs
+    console.log("Payment verified for execution:", executionId);
+    console.log("Triggering execution service...");
+    
+    // PART 3 - Await execution start if possible, or trigger and log
+    // We await to ensure the status becomes 'running' before returning
+    await executeAgent(executionId);
+
+    console.log("Execution triggered successfully for:", executionId);
+
+    return NextResponse.json({
+      success: true,
+      message: "Payment confirmed, agent execution started",
+    });
   } catch (error: any) {
     console.error("Payment confirm error:", error);
     return NextResponse.json(

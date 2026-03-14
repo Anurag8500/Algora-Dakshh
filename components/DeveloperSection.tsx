@@ -5,7 +5,6 @@ import { Terminal, Code2, BarChart3, Database } from "lucide-react";
 import { useState, useEffect } from "react";
 
 const codeString = `import { AlgoraClient } from '@algora/sdk';
-import { Facinet } from '@facinet/core';
 
 // Initialize marketplace client
 const algora = new AlgoraClient({
@@ -13,18 +12,13 @@ const algora = new AlgoraClient({
   wallet: process.env.PRIVATE_KEY
 });
 
-// Configure Facinet payment routing
-const paymentConfig = new Facinet({
-  network: 'avalanche',
-  pricePerExecution: '0.0005 AVAX'
-});
-
 // Register agent to the network
+// Payments are handled via Avalanche Fuji Escrow Contract
 await algora.registerAgent({
   name: 'Vision-Detector-v2',
   description: 'AI Image Detection',
   endpoint: 'https://api.myagent.ai/run',
-  payments: paymentConfig,
+  price: '0.0005 AVAX',
   schema: {
     input: 'image_url',
     output: 'json'
@@ -78,8 +72,8 @@ export function DeveloperSection() {
                   <Terminal className="w-6 h-6 text-primary" />
                 </div>
                 <div>
-                  <h4 className="text-lg font-bold mb-1">Facinet SDK Integration</h4>
-                  <p className="text-muted-foreground text-sm">Drop-in our SDK to instantly enable crypto payments. No smart contract experience required.</p>
+                  <h4 className="text-lg font-bold mb-1">Smart Contract Escrow</h4>
+                  <p className="text-muted-foreground text-sm">Payments are secured by an automated escrow system on Avalanche Fuji. Funds are only released upon successful execution.</p>
                 </div>
               </div>
 

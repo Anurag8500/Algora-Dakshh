@@ -13,6 +13,7 @@ import {
   optimism,
   arbitrum,
   base,
+  avalancheFuji,
 } from 'wagmi/chains';
 import {
   QueryClientProvider,
@@ -24,7 +25,7 @@ import '@rainbow-me/rainbowkit/styles.css';
 const config = getDefaultConfig({
   appName: 'Algora',
   projectId: process.env.NEXT_PUBLIC_PROJECT_ID || 'YOUR_PROJECT_ID',
-  chains: [mainnet, polygon, optimism, arbitrum, base],
+  chains: [mainnet, polygon, optimism, arbitrum, base, avalancheFuji],
   ssr: true, // If your dApp uses server side rendering (SSR)
 });
 

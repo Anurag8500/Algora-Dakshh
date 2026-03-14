@@ -13,7 +13,7 @@ export function HowItWorks() {
     {
       icon: <Wallet className="w-8 h-8 text-primary" />,
       title: "Pay Execution",
-      description: "Securely pay for exactly what you use. Web3 micropayments are handled instantly via the Facinet SDK.",
+      description: "Securely pay for exactly what you use. Funds are held in a trustless escrow contract on Avalanche Fuji.",
     },
     {
       icon: <FileOutput className="w-8 h-8 text-primary" />,

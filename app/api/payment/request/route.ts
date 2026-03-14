@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import connectDB from "@/lib/mongodb";
 import Execution from "@/models/Execution";
+import Agent from "@/models/Agent";
 
 export async function POST(req: NextRequest) {
   try {
@@ -22,12 +23,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const agent = await Agent.findById(execution.agentId);
+    if (!agent) {
+      return NextResponse.json(
+        { success: false, message: "Agent not found" },
+        { status: 404 }
+      );
+    }
+
     return NextResponse.json({
       success: true,
-      executionId: execution._id,
-      amount: execution.paymentAmount,
-      token: "AVAX",
-      message: "Payment required before execution",
+      payment: {
+        contract: process.env.CONTRACT_ADDRESS,
+        amount: execution.paymentAmount,
+        executionId: execution._id,
+        chain: "Avalanche Fuji",
+      },
+      developerWallet: agent.developerWallet,
     });
   } catch (error: any) {
     console.error("Payment request error:", error);
